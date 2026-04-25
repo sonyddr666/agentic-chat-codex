@@ -12,7 +12,14 @@ import {
   updateThreadTitle
 } from "@/lib/db/repositories";
 import { apiError, json } from "@/lib/http";
+import { decideAgentMode } from "@/lib/mode/mode-router";
+import {
+  capabilitiesForProvider,
+  type AgentMode,
+  type AgentReasoningEffort
+} from "@/lib/mode/mode-types";
 import { extractPdfTextFromBuffer } from "@/lib/pdf-text";
+import { checkCodexCliAvailability } from "@/lib/providers/codex-cli-mcp-provider";
 import type { ChatAttachment } from "@/lib/types";
 import { titleFromPrompt } from "@/lib/utils";
 import { persistAttachmentToWorkspace } from "@/lib/workspace-manager";
@@ -135,13 +142,24 @@ function normalizeAttachments(value: unknown): ChatAttachment[] {
   });
 }
 
+function normalizeReasoningEffort(value: unknown): AgentReasoningEffort {
+  return value === "low" || value === "medium" || value === "high" || value === "xhigh"
+    ? value
+    : "xhigh";
+}
+
 export async function POST(
   request: Request,
   context: { params: Promise<{ threadId: string }> }
 ) {
   try {
     const { threadId } = await context.params;
-    const body = (await request.json()) as { content?: string; attachments?: unknown[] };
+    const body = (await request.json()) as {
+      content?: string;
+      attachments?: unknown[];
+      mode?: AgentMode;
+      reasoningEffort?: AgentReasoningEffort;
+    };
     const attachments = normalizeAttachments(body.attachments);
     const content = body.content?.trim() || (attachments.length ? "Analise os anexos." : "");
     if (!content && attachments.length === 0) {
@@ -176,10 +194,21 @@ export async function POST(
       updateThreadTitle(thread.id, titleFromPrompt(content));
     }
 
+    const cliAvailability = await checkCodexCliAvailability(1_500);
+    const modeDecision = decideAgentMode({
+      prompt: content,
+      projectSelected: Boolean(project),
+      explicitMode: body.mode ?? "auto",
+      cliAvailability
+    });
+    const capabilitiesSnapshot = capabilitiesForProvider(modeDecision.providerId);
     const run = createRun({
       threadId: thread.id,
       projectId: project.id,
-      prompt: content
+      prompt: content,
+      reasoningEffort: normalizeReasoningEffort(body.reasoningEffort),
+      modeDecision,
+      capabilitiesSnapshot
     });
 
     const runtime = getAgentRuntime();
@@ -187,7 +216,7 @@ export async function POST(
       void runtime.run({ run, project, prompt: content, attachments: persistedAttachments });
     }, 0);
 
-    return json({ run }, { status: 201 });
+    return json({ run, modeDecision }, { status: 201 });
   } catch (error) {
     return apiError(error, 400);
   }

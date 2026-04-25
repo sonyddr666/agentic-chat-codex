@@ -94,6 +94,11 @@ export function migrateDb(db: SqliteDatabase) {
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
       status TEXT NOT NULL,
       prompt TEXT NOT NULL,
+      provider_id TEXT NOT NULL DEFAULT 'codex-http',
+      mode TEXT NOT NULL DEFAULT 'normal',
+      reasoning_effort TEXT NOT NULL DEFAULT 'xhigh',
+      mode_decision_reasons TEXT NOT NULL DEFAULT '[]',
+      capabilities_snapshot TEXT,
       started_at TEXT NOT NULL,
       completed_at TEXT,
       error TEXT
@@ -138,5 +143,20 @@ export function migrateDb(db: SqliteDatabase) {
     CREATE INDEX IF NOT EXISTS run_events_run_idx ON run_events(run_id, seq);
     CREATE INDEX IF NOT EXISTS file_snapshots_project_idx ON file_snapshots(project_id);
   `);
+
+  addColumnIfMissing(db, "runs", "provider_id", "TEXT NOT NULL DEFAULT 'codex-http'");
+  addColumnIfMissing(db, "runs", "mode", "TEXT NOT NULL DEFAULT 'normal'");
+  addColumnIfMissing(db, "runs", "reasoning_effort", "TEXT NOT NULL DEFAULT 'xhigh'");
+  addColumnIfMissing(db, "runs", "mode_decision_reasons", "TEXT NOT NULL DEFAULT '[]'");
+  addColumnIfMissing(db, "runs", "capabilities_snapshot", "TEXT");
+}
+
+function addColumnIfMissing(db: SqliteDatabase, table: string, column: string, definition: string) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string }>;
+  if (columns.some((item) => item.name === column)) {
+    return;
+  }
+
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition};`);
 }
 

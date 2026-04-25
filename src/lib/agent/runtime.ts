@@ -1,5 +1,4 @@
 import type { ChatAttachment, Message, Project, Run } from "@/lib/types";
-import { getAIProvider } from "@/lib/ai";
 import {
   appendMessageContent,
   completeToolCall,
@@ -12,6 +11,12 @@ import {
   updateRunStatus
 } from "@/lib/db/repositories";
 import { publishRunEvent } from "@/lib/events/event-bus";
+import { getAgentProvider } from "@/lib/providers";
+import type { AgentProviderEvent } from "@/lib/providers/agent-provider";
+import {
+  providerEventToPayload,
+  providerEventToRunEventType
+} from "@/lib/providers/event-normalizer";
 import { clampText } from "@/lib/utils";
 import {
   listWorkspaceFiles,
@@ -22,7 +27,7 @@ import {
   writeWorkspaceFile
 } from "./tools";
 
-type ExplicitTool =
+export type ExplicitTool =
   | { tool: "list_files"; args: { limit?: number } }
   | { tool: "read_file"; args: { path: string } }
   | { tool: "search_text"; args: { query: string } }
@@ -30,6 +35,13 @@ type ExplicitTool =
   | { tool: "write_file"; args: { path: string; content: string } }
   | { tool: "write_files"; args: { files: Array<{ path: string; content: string }> } }
   | { tool: "apply_patch"; args: { path: string; patch: string } };
+
+export type ToolCompletion = {
+  tool: ExplicitTool["tool"];
+  summary: string;
+  paths: string[];
+  changedPaths: string[];
+};
 
 const MAX_AGENT_TOOL_STEPS = 8;
 
@@ -247,7 +259,7 @@ export function isModelRelevantMessage(message: Message) {
   return !diagnostics.some((diagnostic) => content.includes(diagnostic));
 }
 
-function summarizeToolCompletion(toolCall: ExplicitTool, result: unknown) {
+export function summarizeToolCompletion(toolCall: ExplicitTool, result: unknown) {
   if (toolCall.tool === "write_files") {
     if (Array.isArray(result)) {
       const paths = result
@@ -314,12 +326,140 @@ function summarizeToolCompletion(toolCall: ExplicitTool, result: unknown) {
   return "Ferramenta executada.";
 }
 
+function uniqueValues(values: string[]) {
+  return Array.from(new Set(values.filter(Boolean)));
+}
+
+function completionFromToolResult(toolCall: ExplicitTool, result: unknown): ToolCompletion {
+  const summary = summarizeToolCompletion(toolCall, result);
+
+  if (toolCall.tool === "list_files" && Array.isArray(result)) {
+    const paths = uniqueValues(result.map((item) => String(item ?? "")));
+    return { tool: toolCall.tool, summary, paths, changedPaths: [] };
+  }
+
+  if (toolCall.tool === "write_files" && Array.isArray(result)) {
+    const items = result.filter((item): item is Record<string, unknown> => isRecord(item));
+    const paths = uniqueValues(items.map((item) => String(item.path ?? "")));
+    const changedPaths = uniqueValues(
+      items
+        .filter((item) => typeof item.diff === "string" && item.diff.trim())
+        .map((item) => String(item.path ?? ""))
+    );
+
+    return { tool: toolCall.tool, summary, paths, changedPaths };
+  }
+
+  if (
+    (toolCall.tool === "write_file" || toolCall.tool === "apply_patch") &&
+    isRecord(result) &&
+    typeof result.path === "string"
+  ) {
+    const changed = typeof result.diff === "string" && result.diff.trim();
+    return {
+      tool: toolCall.tool,
+      summary,
+      paths: [result.path],
+      changedPaths: changed ? [result.path] : []
+    };
+  }
+
+  return { tool: toolCall.tool, summary, paths: [], changedPaths: [] };
+}
+
+function formatPathList(paths: string[]) {
+  return paths.map((path) => `\`${path}\``).join(", ");
+}
+
+function formatPathBullets(paths: string[]) {
+  return paths.map((path) => `- \`${path}\``).join("\n");
+}
+
+export function summarizeToolCompletions(completions: ToolCompletion[]) {
+  if (completions.length === 0) {
+    return "";
+  }
+
+  const fileCompletions = completions.filter((completion) => completion.paths.length > 0);
+  const paths = uniqueValues(fileCompletions.flatMap((completion) => completion.paths));
+  const changedPaths = uniqueValues(fileCompletions.flatMap((completion) => completion.changedPaths));
+  const onlyListedFiles =
+    fileCompletions.length > 0 &&
+    fileCompletions.every((completion) => completion.tool === "list_files");
+
+  if (onlyListedFiles && paths.length) {
+    return [
+      `Encontrei ${paths.length} arquivo${paths.length === 1 ? "" : "s"} no workspace:`,
+      formatPathBullets(paths)
+    ].join("\n");
+  }
+
+  if (paths.length > 1) {
+    const lines = [
+      changedPaths.length
+        ? `Salvei/atualizei ${changedPaths.length} arquivo${changedPaths.length === 1 ? "" : "s"}: ${formatPathList(changedPaths)}.`
+        : `Os ${paths.length} arquivos ja estavam atualizados: ${formatPathList(paths)}.`
+    ];
+
+    const otherSummaries = uniqueValues(
+      completions
+        .filter((completion) => completion.paths.length === 0)
+        .map((completion) => completion.summary)
+    );
+    if (otherSummaries.length) {
+      lines.push(...otherSummaries.map((summary) => `Tambem: ${summary}`));
+    }
+
+    return lines.join("\n");
+  }
+
+  if (completions.length === 1) {
+    return completions[0].summary;
+  }
+
+  const summaries = uniqueValues(completions.map((completion) => completion.summary));
+  return ["Resumo do que fiz:", ...summaries.map((summary) => `- ${summary}`)].join("\n");
+}
+
+function finalTextMissesChangedPaths(finalText: string, completions: ToolCompletion[]) {
+  const changedPaths = uniqueValues(completions.flatMap((completion) => completion.changedPaths));
+  if (changedPaths.length <= 1) {
+    return false;
+  }
+
+  return changedPaths.some((path) => !finalText.includes(path));
+}
+
+function looksLikeRawToolData(finalText: string) {
+  const trimmed = finalText.trim();
+  if (!trimmed || !/^[\[{]/.test(trimmed)) {
+    return false;
+  }
+
+  try {
+    JSON.parse(trimmed);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function shouldPreferExecutionSummary(finalText: string, completions: ToolCompletion[]) {
+  if (!finalText.trim()) {
+    return completions.length > 0;
+  }
+
+  return looksLikeRawToolData(finalText) || finalTextMissesChangedPaths(finalText, completions);
+}
+
 function toolSignature(toolCall: ExplicitTool) {
   return JSON.stringify(toolCall);
 }
 
 const workspaceIntentPatterns = [
-  /\b(arquivo|arquivos|pasta|pastas|listar|liste|ler|leia|file|files|workspace|projeto|project|codigo|code|erro|bug|corrigir|corrija|fix|terminal|shell|comando|npm|build|teste|test|component|api|rota|route|diff|patch)\b/,
+  /\b(arquivo|arquivos|pasta|pastas|file|files|workspace|projeto|project|codigo|code|erro|bug|terminal|shell|comando|npm|build|teste|test|component|api|rota|route|diff|patch)\b/,
+  /\b(analisar|analise|lista|listar|liste|ler|leia|rodar|rode|executar|execute|fazer|faz|criar|crie|apagar|apague|excluir|exclua|deletar|delete|remover|remova|destruir|destrua|debugar|debugue|debug|ver|ve|veja|verificar|verifique|conferir|confira|checar|cheque|olhar|olhe|olhada|olhadinha|arrumar|arruma|arrume|corrigir|corrija|validar|valide|inspecionar|inspecione|revisar|revise)\b/,
+  /\b(ve pra mim|ve para mim|da uma olhada|de uma olhada|da uma olhadinha|de uma olhadinha|faz essa merda|arruma essa bosta)\b/,
   /(^|\s)(src\/|app\/|pages\/|package\.json|next\.config|\.tsx?\b|\.jsx?\b|\.json\b|\.css\b|\.md\b)/
 ];
 
@@ -357,10 +497,18 @@ export class LocalAgentRuntime implements AgentRuntime {
     prompt: string;
     attachments?: ChatAttachment[];
   }) {
-    const provider = getAIProvider();
+    const provider = getAgentProvider(input.run.providerId);
     const toolOutputs: string[] = [];
+    const toolCompletions: ToolCompletion[] = [];
     let assistantMessage: Message | null = null;
     let lastToolCompletionText = "";
+
+    const recordToolCompletion = (toolCall: ExplicitTool, result: unknown) => {
+      const completion = completionFromToolResult(toolCall, result);
+      toolCompletions.push(completion);
+      lastToolCompletionText = summarizeToolCompletions(toolCompletions);
+      return completion;
+    };
 
     const emit = (type: Parameters<typeof createRunEvent>[0]["type"], payload: Record<string, unknown>) => {
       const event = createRunEvent({ runId: input.run.id, type, payload });
@@ -483,16 +631,22 @@ export class LocalAgentRuntime implements AgentRuntime {
       const messages = listMessages(input.run.threadId).filter(isModelRelevantMessage);
       let output = "";
 
-      for await (const chunk of provider.streamChat({
+      for await (const event of provider.stream({
         prompt: input.prompt,
         messages,
         workspaceSummary,
         toolOutputs,
-        attachments: input.attachments
+        attachments: input.attachments,
+        reasoningEffort: input.run.reasoningEffort
       })) {
         ensureNotCancelled();
-        if (chunk.type === "text" && chunk.text) {
-          output += chunk.text;
+        if (event.type === "text_delta" && event.text) {
+          output += event.text;
+          continue;
+        }
+
+        if (event.type === "error") {
+          throw new Error(event.error);
         }
       }
 
@@ -505,8 +659,25 @@ export class LocalAgentRuntime implements AgentRuntime {
         threadId: input.run.threadId,
         runId: input.run.id,
         role: "assistant",
-        content: ""
+        content: "",
+        metadata: {
+          provider: provider.id,
+          mode: input.run.mode
+        }
       });
+
+      if (input.run.mode === "cli") {
+        await this.runCliProvider({
+          input,
+          provider,
+          assistantMessageId: assistantMessage.id,
+          emit,
+          ensureNotCancelled
+        });
+        updateRunStatus(input.run.id, "completed");
+        emit("run_complete", { status: "completed", provider: provider.id });
+        return;
+      }
 
       const explicitTool = parseExplicitTool(input.prompt);
       let workspaceSummary = "";
@@ -517,7 +688,7 @@ export class LocalAgentRuntime implements AgentRuntime {
 
       if (explicitTool) {
         const result = await executeTool(explicitTool);
-        lastToolCompletionText = summarizeToolCompletion(explicitTool, result);
+        recordToolCompletion(explicitTool, result);
       }
 
       let finalText = "";
@@ -551,12 +722,16 @@ export class LocalAgentRuntime implements AgentRuntime {
 
           const result = await executeTool(requestedTool);
           executedToolSteps += 1;
-          lastToolCompletionText = summarizeToolCompletion(requestedTool, result);
+          recordToolCompletion(requestedTool, result);
         }
 
         if (finalText) {
           break;
         }
+      }
+
+      if (shouldPreferExecutionSummary(finalText, toolCompletions)) {
+        finalText = summarizeToolCompletions(toolCompletions);
       }
 
       if (finalText.trim()) {
@@ -565,7 +740,7 @@ export class LocalAgentRuntime implements AgentRuntime {
       }
 
       updateRunStatus(input.run.id, "completed");
-      emit("run_complete", { status: "completed", provider: provider.name });
+      emit("run_complete", { status: "completed", provider: provider.id });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Run failed.";
       const status = message === "Run cancelled." ? "cancelled" : "failed";
@@ -578,6 +753,67 @@ export class LocalAgentRuntime implements AgentRuntime {
         error: status === "failed" ? message : null
       });
     }
+  }
+
+  private async runCliProvider({
+    input,
+    provider,
+    assistantMessageId,
+    emit,
+    ensureNotCancelled
+  }: {
+    input: {
+      run: Run;
+      project: Project;
+      prompt: string;
+      attachments?: ChatAttachment[];
+    };
+    provider: ReturnType<typeof getAgentProvider>;
+    assistantMessageId: string;
+    emit: (
+      type: Parameters<typeof createRunEvent>[0]["type"],
+      payload: Record<string, unknown>
+    ) => void;
+    ensureNotCancelled: () => void;
+  }) {
+    const messages = listMessages(input.run.threadId).filter(isModelRelevantMessage);
+    for await (const event of provider.stream({
+      prompt: input.prompt,
+      messages,
+      workspaceSummary: "",
+      toolOutputs: [],
+      attachments: input.attachments,
+      reasoningEffort: input.run.reasoningEffort,
+      cwd: input.project.workspacePath
+    })) {
+      ensureNotCancelled();
+      this.persistProviderEvent(event, assistantMessageId, emit);
+    }
+  }
+
+  private persistProviderEvent(
+    event: AgentProviderEvent,
+    assistantMessageId: string,
+    emit: (
+      type: Parameters<typeof createRunEvent>[0]["type"],
+      payload: Record<string, unknown>
+    ) => void
+  ) {
+    if (event.type === "text_delta" && event.text) {
+      appendMessageContent(assistantMessageId, event.text);
+      emit("message_delta", { messageId: assistantMessageId, text: event.text });
+      return;
+    }
+
+    if (event.type === "task_complete") {
+      return;
+    }
+
+    if (event.type === "error") {
+      throw new Error(event.error);
+    }
+
+    emit(providerEventToRunEventType(event), providerEventToPayload(event));
   }
 }
 

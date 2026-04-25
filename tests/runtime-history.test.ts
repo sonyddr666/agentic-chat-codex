@@ -3,7 +3,9 @@ import {
   isModelRelevantMessage,
   parseAgentToolCall,
   parseAgentToolCalls,
-  shouldUseWorkspaceContext
+  shouldUseWorkspaceContext,
+  summarizeToolCompletions,
+  type ToolCompletion
 } from "@/lib/agent/runtime";
 import type { Message } from "@/lib/types";
 
@@ -63,6 +65,17 @@ describe("workspace context detection", () => {
     expect(shouldUseWorkspaceContext("liste os arquivos")).toBe(true);
     expect(shouldUseWorkspaceContext("corrija o erro no app")).toBe(true);
   });
+
+  it("treats informal imperative commands as workspace actions", () => {
+    expect(shouldUseWorkspaceContext("verifique")).toBe(true);
+    expect(shouldUseWorkspaceContext("ve pra mim")).toBe(true);
+    expect(shouldUseWorkspaceContext("de uma olhadinha")).toBe(true);
+    expect(shouldUseWorkspaceContext("analisar listar rodar fazer criar")).toBe(true);
+    expect(shouldUseWorkspaceContext("apagar excluir destruir")).toBe(true);
+    expect(shouldUseWorkspaceContext("debugar")).toBe(true);
+    expect(shouldUseWorkspaceContext("faz essa merda")).toBe(true);
+    expect(shouldUseWorkspaceContext("arruma essa bosta")).toBe(true);
+  });
 });
 
 describe("agent tool calls", () => {
@@ -117,5 +130,49 @@ describe("agent tool calls", () => {
   it("rejects invalid tool-call JSON", () => {
     expect(parseAgentToolCall("Claro, vou listar.")).toBeNull();
     expect(parseAgentToolCall('{"tool":"read_file","args":{}}')).toBeNull();
+  });
+});
+
+describe("tool completion summaries", () => {
+  it("aggregates multi-file writes into one faithful summary", () => {
+    const completions: ToolCompletion[] = [
+      {
+        tool: "write_file",
+        summary: "Arquivo salvo em `teste.md`.",
+        paths: ["teste.md"],
+        changedPaths: ["teste.md"]
+      },
+      {
+        tool: "write_file",
+        summary: "Arquivo salvo em `teste.txt`.",
+        paths: ["teste.txt"],
+        changedPaths: ["teste.txt"]
+      },
+      {
+        tool: "write_file",
+        summary: "Arquivo salvo em `teste.html`.",
+        paths: ["teste.html"],
+        changedPaths: ["teste.html"]
+      }
+    ];
+
+    expect(summarizeToolCompletions(completions)).toBe(
+      "Salvei/atualizei 3 arquivos: `teste.md`, `teste.txt`, `teste.html`."
+    );
+  });
+
+  it("formats list_files output as a readable answer", () => {
+    const completions: ToolCompletion[] = [
+      {
+        tool: "list_files",
+        summary: "Listei 3 arquivos no workspace.",
+        paths: ["teste.html", "teste.md", "teste.txt"],
+        changedPaths: []
+      }
+    ];
+
+    expect(summarizeToolCompletions(completions)).toBe(
+      ["Encontrei 3 arquivos no workspace:", "- `teste.html`", "- `teste.md`", "- `teste.txt`"].join("\n")
+    );
   });
 });

@@ -10,6 +10,14 @@ import type {
   Thread,
   ToolCall
 } from "@/lib/types";
+import { capabilitiesForProvider } from "@/lib/mode/mode-types";
+import type {
+  AgentProviderCapabilities,
+  AgentProviderId,
+  AgentReasoningEffort,
+  ModeDecision,
+  ResolvedAgentMode
+} from "@/lib/mode/mode-types";
 import { createId, nowIso, parseJson } from "@/lib/utils";
 import { getDb, type SqliteDatabase } from "./client";
 
@@ -45,6 +53,11 @@ type RunRow = {
   project_id: string;
   status: RunStatus;
   prompt: string;
+  provider_id: AgentProviderId | null;
+  mode: ResolvedAgentMode | null;
+  reasoning_effort: AgentReasoningEffort | null;
+  mode_decision_reasons: string | null;
+  capabilities_snapshot: string | null;
   started_at: string;
   completed_at: string | null;
   error: string | null;
@@ -114,6 +127,14 @@ const toRun = (row: RunRow): Run => ({
   projectId: row.project_id,
   status: row.status,
   prompt: row.prompt,
+  providerId: row.provider_id ?? "codex-http",
+  mode: row.mode ?? "normal",
+  reasoningEffort: row.reasoning_effort ?? "xhigh",
+  modeDecisionReasons: parseJson<string[]>(row.mode_decision_reasons, []),
+  capabilitiesSnapshot: parseJson<AgentProviderCapabilities | null>(
+    row.capabilities_snapshot,
+    null
+  ),
   startedAt: row.started_at,
   completedAt: row.completed_at,
   error: row.error
@@ -306,15 +327,32 @@ export function listMessages(threadId: string, db?: SqliteDatabase) {
 }
 
 export function createRun(
-  input: { threadId: string; projectId: string; prompt: string },
+  input: {
+    threadId: string;
+    projectId: string;
+    prompt: string;
+    reasoningEffort?: AgentReasoningEffort;
+    modeDecision?: ModeDecision;
+    capabilitiesSnapshot?: AgentProviderCapabilities | null;
+  },
   db?: SqliteDatabase
 ) {
+  const providerId = input.modeDecision?.providerId ?? "codex-http";
+  const mode = input.modeDecision?.mode ?? "normal";
+  const reasoningEffort = input.reasoningEffort ?? "xhigh";
+  const capabilitiesSnapshot =
+    input.capabilitiesSnapshot ?? capabilitiesForProvider(providerId);
   const run: Run = {
     id: createId("run"),
     threadId: input.threadId,
     projectId: input.projectId,
     status: "queued",
     prompt: input.prompt,
+    providerId,
+    mode,
+    reasoningEffort,
+    modeDecisionReasons: input.modeDecision?.reasons ?? [],
+    capabilitiesSnapshot,
     startedAt: nowIso(),
     completedAt: null,
     error: null
@@ -322,7 +360,7 @@ export function createRun(
 
   dbOrDefault(db)
     .prepare(
-      "INSERT INTO runs (id, thread_id, project_id, status, prompt, started_at, completed_at, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      "INSERT INTO runs (id, thread_id, project_id, status, prompt, provider_id, mode, reasoning_effort, mode_decision_reasons, capabilities_snapshot, started_at, completed_at, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .run(
       run.id,
@@ -330,6 +368,11 @@ export function createRun(
       run.projectId,
       run.status,
       run.prompt,
+      run.providerId,
+      run.mode,
+      run.reasoningEffort,
+      JSON.stringify(run.modeDecisionReasons),
+      run.capabilitiesSnapshot ? JSON.stringify(run.capabilitiesSnapshot) : null,
       run.startedAt,
       run.completedAt,
       run.error

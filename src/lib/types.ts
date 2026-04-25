@@ -1,3 +1,11 @@
+import type {
+  AgentProviderCapabilities,
+  AgentProviderId,
+  AgentReasoningEffort,
+  ModeDecision,
+  ResolvedAgentMode
+} from "@/lib/mode/mode-types";
+
 export type Project = {
   id: string;
   name: string;
@@ -61,6 +69,11 @@ export type Run = {
   projectId: string;
   status: RunStatus;
   prompt: string;
+  providerId: AgentProviderId;
+  mode: ResolvedAgentMode;
+  reasoningEffort: AgentReasoningEffort;
+  modeDecisionReasons: string[];
+  capabilitiesSnapshot: AgentProviderCapabilities | null;
   startedAt: string;
   completedAt: string | null;
   error: string | null;
@@ -68,10 +81,13 @@ export type Run = {
 
 export type RunEventType =
   | "message_delta"
+  | "reasoning_delta"
   | "tool_start"
   | "tool_output"
+  | "command_output_delta"
   | "file_changed"
   | "diff_ready"
+  | "approval_requested"
   | "error"
   | "run_complete";
 
@@ -150,4 +166,9 @@ export type CodexAuthStatus = {
   activeAccountId: string | null;
   activeAccount: CodexSafeAccount | null;
   accounts: CodexSafeAccount[];
+};
+
+export type RunStartResponse = {
+  run: Run;
+  modeDecision: ModeDecision;
 };

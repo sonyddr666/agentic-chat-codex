@@ -32,7 +32,11 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, DragEvent, FormEvent } from "react";
 import { AuthPanel } from "@/components/auth-panel";
+import { ProviderModeBadge } from "@/components/provider/provider-mode-badge";
+import { ProviderModeSelector } from "@/components/provider/provider-mode-selector";
+import { ReasoningEffortSelector } from "@/components/provider/reasoning-effort-selector";
 import { RichMessage } from "@/components/rich-message";
+import { ModeDecisionPanel } from "@/components/runs/mode-decision-panel";
 import {
   ATTACHMENT_LIMITS,
   attachmentMetadata,
@@ -40,6 +44,12 @@ import {
   isPdfAttachment,
   isTextLikeAttachment
 } from "@/lib/attachments";
+import {
+  capabilitiesForProvider,
+  type AgentMode,
+  type AgentReasoningEffort,
+  type ModeDecision
+} from "@/lib/mode/mode-types";
 import type {
   ChatAttachment,
   ChatAttachmentMetadata,
@@ -48,6 +58,7 @@ import type {
   Project,
   Run,
   RunEvent,
+  RunStartResponse,
   Thread,
   ToolCall,
   WorkspaceTreeNode
@@ -81,10 +92,13 @@ type DiffEntry = {
 
 const RUN_EVENT_TYPES: RunEvent["type"][] = [
   "message_delta",
+  "reasoning_delta",
   "tool_start",
   "tool_output",
+  "command_output_delta",
   "file_changed",
   "diff_ready",
+  "approval_requested",
   "error",
   "run_complete"
 ];
@@ -183,6 +197,37 @@ function EventIcon({ type }: { type: RunEvent["type"] }) {
   }
 
   return <Bot className="h-4 w-4 text-muted" />;
+}
+
+function formatRunEventPayload(event: RunEvent) {
+  if (event.type === "message_delta") {
+    return String(event.payload.text ?? "");
+  }
+
+  if (event.type === "tool_start") {
+    const name = String(event.payload.name ?? "tool");
+    const args = event.payload.args;
+    return `${name}\n${JSON.stringify(args ?? {}, null, 2)}`;
+  }
+
+  if (event.type === "tool_output") {
+    const name = String(event.payload.name ?? "tool");
+    const output = String(event.payload.output ?? event.payload.error ?? "");
+    if (name === "list_files") {
+      try {
+        const files = JSON.parse(output) as unknown;
+        if (Array.isArray(files)) {
+          return [`${files.length} arquivo${files.length === 1 ? "" : "s"}:`, ...files.map((file) => `- ${String(file)}`)].join("\n");
+        }
+      } catch {
+        return output;
+      }
+    }
+
+    return output || JSON.stringify(event.payload, null, 2);
+  }
+
+  return JSON.stringify(event.payload, null, 2);
 }
 
 function TreeNode({
@@ -408,6 +453,9 @@ export function AppShell() {
   const [diffs, setDiffs] = useState<DiffEntry[]>([]);
   const [authStatus, setAuthStatus] = useState<CodexAuthStatus | null>(null);
   const [composer, setComposer] = useState("");
+  const [agentMode, setAgentMode] = useState<AgentMode>("auto");
+  const [reasoningEffort, setReasoningEffort] = useState<AgentReasoningEffort>("xhigh");
+  const [latestModeDecision, setLatestModeDecision] = useState<ModeDecision | null>(null);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [isDraggingAttachment, setIsDraggingAttachment] = useState(false);
@@ -463,6 +511,10 @@ export function AppShell() {
     () => runs.find((run) => run.id === runningRunId) ?? runs[0] ?? null,
     [runningRunId, runs]
   );
+  const activeProviderId = activeRun?.providerId ?? "codex-http";
+  const activeResolvedMode = activeRun?.mode ?? "normal";
+  const activeCapabilities =
+    activeRun?.capabilitiesSnapshot ?? capabilitiesForProvider(activeProviderId);
   const activeAccountLabel = authStatus?.activeAccount
     ? authStatus.activeAccount.email !== "-"
       ? authStatus.activeAccount.email
@@ -470,20 +522,15 @@ export function AppShell() {
     : "No account";
   const messageMeta = useCallback(
     (message: Message) => {
-      const metadata = message.metadata ?? {};
-      const provider =
-        typeof metadata.provider === "string" ? metadata.provider : authStatus?.provider ?? "codex-chatgpt";
-      const model = typeof metadata.model === "string" ? metadata.model : authStatus?.model ?? "gpt-5.4-mini";
-      const runInfo = message.runId ? `run ${message.runId.replace(/^run_/, "").slice(0, 8)}` : null;
       const time = formatTime(message.createdAt);
 
       if (message.role === "assistant") {
-        return ["Assistente", provider, model, runInfo, time].filter(Boolean).join(" / ");
+        return ["Assistente", time].join(" / ");
       }
 
       return ["Voce", time].join(" / ");
     },
-    [authStatus?.model, authStatus?.provider]
+    []
   );
 
   const loadThread = useCallback(async (threadId: string) => {
@@ -517,6 +564,7 @@ export function AppShell() {
     setToolCalls([]);
     setEvents([]);
     setDiffs([]);
+    setLatestModeDecision(null);
     return data.thread;
   }, []);
 
@@ -586,6 +634,31 @@ export function AppShell() {
     });
   }, [loadAuthStatus]);
 
+  useEffect(() => {
+    const stored = window.localStorage.getItem("agentic.mode");
+    if (stored === "auto" || stored === "normal" || stored === "cli") {
+      setAgentMode(stored);
+    }
+
+    const storedEffort = window.localStorage.getItem("agentic.reasoningEffort");
+    if (
+      storedEffort === "low" ||
+      storedEffort === "medium" ||
+      storedEffort === "high" ||
+      storedEffort === "xhigh"
+    ) {
+      setReasoningEffort(storedEffort);
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("agentic.mode", agentMode);
+  }, [agentMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem("agentic.reasoningEffort", reasoningEffort);
+  }, [reasoningEffort]);
+
   const updateAutoScroll = useCallback(() => {
     const element = chatScrollRef.current;
     if (!element) {
@@ -630,6 +703,7 @@ export function AppShell() {
     setActiveProjectId(projectId);
     setSelectedFile(null);
     setDiffs([]);
+    setLatestModeDecision(null);
     closeLeftOnMobile();
     await loadTree(projectId);
 
@@ -647,6 +721,7 @@ export function AppShell() {
     setActiveThreadId(threadId);
     setEvents([]);
     setDiffs([]);
+    setLatestModeDecision(null);
     closeLeftOnMobile();
     await loadThread(threadId);
   };
@@ -871,6 +946,7 @@ export function AppShell() {
     setError(null);
     setEvents([]);
     setDiffs([]);
+    setLatestModeDecision(null);
     shouldAutoScrollRef.current = true;
     setMessages((current) => [
       ...current,
@@ -893,10 +969,16 @@ export function AppShell() {
     ]);
 
     try {
-      const data = await fetchJson<{ run: Run }>(`/api/threads/${activeThreadId}/runs`, {
+      const data = await fetchJson<RunStartResponse>(`/api/threads/${activeThreadId}/runs`, {
         method: "POST",
-        body: JSON.stringify({ content: prompt, attachments: pendingAttachments })
+        body: JSON.stringify({
+          content: prompt,
+          attachments: pendingAttachments,
+          mode: agentMode,
+          reasoningEffort
+        })
       });
+      setLatestModeDecision(data.modeDecision);
       setRunningRunId(data.run.id);
       setRuns((current) => [data.run, ...current]);
       setActivePanel("run");
@@ -1095,6 +1177,13 @@ export function AppShell() {
             </div>
 
             <div className="flex shrink-0 items-center gap-1">
+              <div className="hidden md:block">
+                <ProviderModeBadge
+                  mode={activeResolvedMode}
+                  providerId={activeProviderId}
+                  capabilities={activeCapabilities}
+                />
+              </div>
               <button
                 className="hidden h-9 max-w-48 items-center gap-2 rounded-md border border-line bg-panel px-3 text-sm hover:bg-paper sm:flex"
                 onClick={() => openPanel("auth")}
@@ -1221,7 +1310,7 @@ export function AppShell() {
           </div>
 
           <form
-            className="shrink-0 border-t border-line bg-panel p-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] sm:p-3 sm:pb-[calc(0.75rem+env(safe-area-inset-bottom))]"
+            className="shrink-0 border-t border-line bg-panel p-1.5 pb-[calc(0.375rem+env(safe-area-inset-bottom))] sm:p-2 sm:pb-[calc(0.5rem+env(safe-area-inset-bottom))]"
             onSubmit={sendMessage}
           >
             <input
@@ -1236,7 +1325,21 @@ export function AppShell() {
                 event.currentTarget.value = "";
               }}
             />
-            <div className="mx-auto max-w-3xl rounded-md border border-line bg-paper shadow-soft sm:rounded-lg">
+            <div className="mx-auto max-w-3xl rounded-md border border-line bg-paper shadow-soft">
+              <div className="flex h-9 flex-wrap items-center justify-between gap-2 border-b border-line px-2">
+                <ProviderModeSelector
+                  value={agentMode}
+                  disabled={Boolean(runningRunId)}
+                  onChange={setAgentMode}
+                />
+                <div className="ml-auto">
+                  <ReasoningEffortSelector
+                    value={reasoningEffort}
+                    disabled={Boolean(runningRunId)}
+                    onChange={setReasoningEffort}
+                  />
+                </div>
+              </div>
               {attachments.length ? (
                 <div className="flex flex-wrap gap-2 border-b border-line p-2">
                   {attachments.map((attachment) => (
@@ -1256,7 +1359,7 @@ export function AppShell() {
                   {attachmentError}
                 </div>
               ) : null}
-              <div className="flex items-end gap-2 p-2">
+              <div className="flex items-center gap-2 px-2 py-1.5">
                 <button
                   type="button"
                   className="grid h-10 w-10 shrink-0 place-items-center rounded-md hover:bg-panel"
@@ -1267,9 +1370,9 @@ export function AppShell() {
                   <Paperclip className="h-4 w-4" />
                 </button>
                 <textarea
-                  className="thin-scrollbar max-h-32 min-h-11 flex-1 resize-none bg-transparent px-1 py-2 text-[16px] leading-6 outline-none placeholder:text-muted sm:text-sm"
+                  className="thin-scrollbar max-h-32 min-h-10 flex-1 resize-none bg-transparent px-1 py-2 text-[16px] leading-6 outline-none placeholder:text-muted sm:text-sm"
                   placeholder="Mensagem para o chat..."
-                  rows={2}
+                  rows={1}
                   value={composer}
                   onChange={(event) => setComposer(event.target.value)}
                   onFocus={settleComposerOnKeyboard}
@@ -1398,12 +1501,16 @@ export function AppShell() {
                     <div className="flex items-center justify-between gap-2">
                       <div className="min-w-0">
                         <div className="truncate text-sm font-semibold">{activeRun.id}</div>
-                        <div className="text-xs text-muted">{activeRun.status}</div>
+                        <div className="text-xs text-muted">
+                          {activeRun.status} / {activeRun.mode === "cli" ? "Codex CLI" : "Normal"}
+                        </div>
                       </div>
                       {runningRunId ? <Loader2 className="h-4 w-4 animate-spin text-teal" /> : null}
                     </div>
                   </div>
                 ) : null}
+
+                <ModeDecisionPanel run={activeRun} decision={latestModeDecision} />
 
                 {events.map((event) => (
                   <div key={event.id} className="rounded-lg border border-line bg-paper p-3">
@@ -1413,7 +1520,7 @@ export function AppShell() {
                       <span className="ml-auto">{formatTime(event.createdAt)}</span>
                     </div>
                     <pre className="thin-scrollbar max-h-48 overflow-auto whitespace-pre-wrap text-xs leading-5">
-                      {JSON.stringify(event.payload, null, 2)}
+                      {formatRunEventPayload(event)}
                     </pre>
                   </div>
                 ))}
@@ -1479,9 +1586,25 @@ export function AppShell() {
                     Options
                   </div>
                   <div className="space-y-2 text-sm">
+                    <div className="rounded-md bg-panel px-3 py-2">
+                      <div className="mb-2 text-xs text-muted">Mode</div>
+                      <ProviderModeSelector
+                        value={agentMode}
+                        disabled={Boolean(runningRunId)}
+                        onChange={setAgentMode}
+                      />
+                    </div>
+                    <div className="rounded-md bg-panel px-3 py-2">
+                      <div className="mb-2 text-xs text-muted">Inteligencia</div>
+                      <ReasoningEffortSelector
+                        value={reasoningEffort}
+                        disabled={Boolean(runningRunId)}
+                        onChange={setReasoningEffort}
+                      />
+                    </div>
                     <div className="flex items-center justify-between gap-3 rounded-md bg-panel px-3 py-2">
                       <span className="text-muted">Provider</span>
-                      <span className="truncate font-medium">{authStatus?.provider ?? "codex-chatgpt"}</span>
+                      <span className="truncate font-medium">{activeProviderId}</span>
                     </div>
                     <div className="flex items-center justify-between gap-3 rounded-md bg-panel px-3 py-2">
                       <span className="text-muted">Model</span>
@@ -1497,6 +1620,8 @@ export function AppShell() {
                     </div>
                   </div>
                 </div>
+
+                <ModeDecisionPanel run={activeRun} decision={latestModeDecision} />
 
                 <div className="grid grid-cols-2 gap-2">
                   <button

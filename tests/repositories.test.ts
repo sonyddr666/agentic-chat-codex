@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDatabase, type SqliteDatabase } from "@/lib/db/client";
+import { CODEX_CLI_CAPABILITIES } from "@/lib/mode/mode-types";
 import {
   createMessage,
   createProject,
@@ -12,6 +13,7 @@ import {
   listMessages,
   listProjects,
   listRunEvents,
+  listRuns,
   listThreads,
   updateRunStatus
 } from "@/lib/db/repositories";
@@ -46,7 +48,24 @@ describe("repositories", () => {
       { threadId: thread.id, role: "user", content: "Build this." },
       db
     );
-    const run = createRun({ threadId: thread.id, projectId: project.id, prompt: "Build this." }, db);
+    const run = createRun(
+      {
+        threadId: thread.id,
+        projectId: project.id,
+        prompt: "Build this.",
+        modeDecision: {
+          requestedMode: "cli",
+          mode: "cli",
+          providerId: "codex-cli-mcp",
+          confidence: 1,
+          reasons: ["modo Codex CLI solicitado pelo usuario"],
+          requiresApproval: true,
+          cliAvailable: true
+        },
+        capabilitiesSnapshot: CODEX_CLI_CAPABILITIES
+      },
+      db
+    );
     const event = createRunEvent(
       { runId: run.id, type: "message_delta", payload: { text: "Working" } },
       db
@@ -58,6 +77,13 @@ describe("repositories", () => {
     expect(listThreads(project.id, db)).toHaveLength(1);
     expect(listMessages(thread.id, db)[0]?.id).toBe(message.id);
     expect(listRunEvents(run.id, 0, db)[0]?.id).toBe(event.id);
+    expect(listRuns(thread.id, db)[0]).toMatchObject({
+      id: run.id,
+      mode: "cli",
+      providerId: "codex-cli-mcp",
+      modeDecisionReasons: ["modo Codex CLI solicitado pelo usuario"],
+      capabilitiesSnapshot: CODEX_CLI_CAPABILITIES
+    });
   });
 });
 

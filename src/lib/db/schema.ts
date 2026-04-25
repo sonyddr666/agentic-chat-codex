@@ -45,6 +45,11 @@ export const runs = sqliteTable("runs", {
     .references(() => projects.id, { onDelete: "cascade" }),
   status: text("status").notNull(),
   prompt: text("prompt").notNull(),
+  providerId: text("provider_id").notNull().default("codex-http"),
+  mode: text("mode").notNull().default("normal"),
+  reasoningEffort: text("reasoning_effort").notNull().default("xhigh"),
+  modeDecisionReasons: text("mode_decision_reasons").notNull().default("[]"),
+  capabilitiesSnapshot: text("capabilities_snapshot"),
   startedAt: text("started_at").notNull(),
   completedAt: text("completed_at"),
   error: text("error")

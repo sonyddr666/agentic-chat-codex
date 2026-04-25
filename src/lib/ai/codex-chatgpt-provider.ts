@@ -1,4 +1,5 @@
 import { getCodexAuthManager, type CodexAuthManager } from "@/lib/codex/auth-manager";
+import type { AgentReasoningEffort } from "@/lib/mode/mode-types";
 import type { ChatAttachment } from "@/lib/types";
 import type { AIProvider, AIProviderInput } from "./provider";
 
@@ -41,6 +42,13 @@ type CodexClientConfig = {
   timeout?: number;
   fetchImpl?: typeof fetch;
   authManager?: CodexAuthManager;
+};
+
+const REASONING_EFFORT_LABELS: Record<AgentReasoningEffort, string> = {
+  low: "baixo",
+  medium: "medio",
+  high: "alto",
+  xhigh: "altissimo"
 };
 
 export class CodexChatGptProvider implements AIProvider {
@@ -215,6 +223,7 @@ export class CodexChatGptProvider implements AIProvider {
       "Use portugues quando o usuario falar portugues.",
       "Quando o runtime fornecer contexto de workspace ou saidas de ferramentas, use esses dados para ajudar.",
       "Nao diga que alterou arquivos se os logs de ferramenta nao mostrarem alteracao.",
+      `Nivel de esforco mental solicitado: ${REASONING_EFFORT_LABELS[input.reasoningEffort ?? "xhigh"]}.`,
       [
         "Voce pode pedir ferramentas locais respondendo somente JSON, sem Markdown e sem texto extra.",
         "Formato de uma acao: {\"tool\":\"read_file\",\"args\":{\"path\":\"README.md\"}}",
@@ -222,6 +231,9 @@ export class CodexChatGptProvider implements AIProvider {
         "Tools: list_files {limit?}, read_file {path}, search_text {query}, write_file {path, content}, write_files {files:[{path,content}]}, apply_patch {path, patch}, run_shell {command}.",
         "Quando o usuario pedir varios arquivos, use write_files ou um lote tools com todos os arquivos solicitados.",
         "Use tools quando precisar ver, listar, buscar, criar, editar ou executar algo no workspace.",
+        "Ordens curtas como 'verifique', 'confira', 've pra mim', 'da uma olhada', 'analisar', 'listar', 'rodar', 'fazer', 'criar', 'debugar' ou 'arruma isso' contam como pedido de acao; se houver workspace ou historico relevante, chame ferramentas em vez de responder que pode fazer.",
+        "Para pedidos destrutivos como apagar, excluir, remover ou destruir, nao execute sem alvo claro; explique o risco ou peca confirmacao quando necessario.",
+        "Se a acao pedida depender de descobrir o alvo, comece com list_files, read_file ou search_text para verificar antes de responder.",
         "Nao prometa que vai criar/editar arquivos em texto; primeiro chame as ferramentas necessarias.",
         "Depois que todas as ferramentas necessarias terminarem, responda naturalmente ao usuario."
       ].join("\n")
