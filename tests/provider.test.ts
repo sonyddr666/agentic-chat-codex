@@ -101,6 +101,9 @@ describe("codex chatgpt provider", () => {
       expect((init?.headers as Record<string, string>).Authorization).toBe("Bearer access-token");
       expect((init?.headers as Record<string, string>)["chatgpt-account-id"]).toBe("acc_123");
       const body = JSON.parse(String(init?.body));
+      expect(body.model).toBe("gpt-5.4");
+      expect(body.instructions).toContain("Instrucao de sistema selecionada pelo usuario:");
+      expect(body.instructions).toContain("Fale como reviewer.");
       expect(body.instructions).not.toContain("Contexto do workspace");
       expect(body.instructions).not.toContain("Saidas de ferramentas executadas");
 
@@ -133,7 +136,9 @@ describe("codex chatgpt provider", () => {
       prompt: "Oi",
       messages: [],
       workspaceSummary: "",
-      toolOutputs: []
+      toolOutputs: [],
+      model: "gpt-5.4",
+      systemPrompt: "Fale como reviewer."
     })) {
       output += chunk.text;
     }

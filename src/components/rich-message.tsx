@@ -361,7 +361,7 @@ function CopyButton({
       {copied ? <Check className="h-3.5 w-3.5 text-teal" /> : <Copy className="h-3.5 w-3.5" />}
       {iconOnly ? null : <span>{copied ? "Copied" : label}</span>}
       {iconOnly ? (
-        <span className="pointer-events-none absolute bottom-full right-0 z-20 mb-1 whitespace-nowrap rounded-md bg-ink px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-soft transition-opacity group-hover/copy:opacity-100">
+        <span className="pointer-events-none absolute bottom-full right-0 z-20 mb-1 whitespace-nowrap rounded-md border border-line bg-panel px-2 py-1 text-[11px] font-medium text-ink opacity-0 shadow-soft transition-opacity group-hover/copy:opacity-100">
           {copied ? "Copied" : label}
         </span>
       ) : null}
@@ -390,7 +390,7 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
                 type="button"
                 className={classNames(
                   "flex h-8 items-center gap-1 rounded-md px-2 text-xs",
-                  mode === "code" ? "bg-ink text-white" : "text-muted hover:bg-ink/5"
+                  mode === "code" ? "bg-teal text-white" : "text-muted hover:bg-ink/5"
                 )}
                 onClick={() => setMode("code")}
                 title="Code"
@@ -403,7 +403,7 @@ function CodeBlock({ language, code }: { language: string; code: string }) {
                 type="button"
                 className={classNames(
                   "flex h-8 items-center gap-1 rounded-md px-2 text-xs",
-                  mode === "preview" ? "bg-ink text-white" : "text-muted hover:bg-ink/5"
+                  mode === "preview" ? "bg-teal text-white" : "text-muted hover:bg-ink/5"
                 )}
                 onClick={() => setMode("preview")}
                 title="Preview"

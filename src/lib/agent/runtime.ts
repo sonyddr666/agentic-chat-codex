@@ -1,4 +1,5 @@
 import type { ChatAttachment, Message, Project, Run } from "@/lib/types";
+import type { AgentModel } from "@/lib/mode/mode-types";
 import {
   appendMessageContent,
   completeToolCall,
@@ -487,6 +488,8 @@ export interface AgentRuntime {
     project: Project;
     prompt: string;
     attachments?: ChatAttachment[];
+    model?: AgentModel;
+    systemPrompt?: string;
   }): Promise<void>;
 }
 
@@ -496,6 +499,8 @@ export class LocalAgentRuntime implements AgentRuntime {
     project: Project;
     prompt: string;
     attachments?: ChatAttachment[];
+    model?: AgentModel;
+    systemPrompt?: string;
   }) {
     const provider = getAgentProvider(input.run.providerId);
     const toolOutputs: string[] = [];
@@ -525,18 +530,19 @@ export class LocalAgentRuntime implements AgentRuntime {
     const runTool = async <T>(
       name: string,
       args: Record<string, unknown>,
-      operation: () => Promise<T> | T
+      operation: (toolCall: ReturnType<typeof createToolCall>) => Promise<T> | T
     ) => {
       ensureNotCancelled();
       const toolCall = createToolCall({ runId: input.run.id, name, args });
       emit("tool_start", { toolCallId: toolCall.id, name, args });
 
       try {
-        const result = await operation();
+        const result = await operation(toolCall);
         const output = stringifyToolOutput(result);
         completeToolCall(toolCall.id, { output });
         emit("tool_output", { toolCallId: toolCall.id, name, output });
         toolOutputs.push(`${name}:\n${output}`);
+        ensureNotCancelled();
         return result;
       } catch (error) {
         const message = error instanceof Error ? error.message : "Tool failed.";
@@ -566,8 +572,16 @@ export class LocalAgentRuntime implements AgentRuntime {
       }
 
       if (toolCall.tool === "run_shell") {
-        return runTool("run_shell", toolCall.args, () =>
-          runWorkspaceShell(input.project.workspacePath, toolCall.args.command)
+        return runTool("run_shell", toolCall.args, (createdToolCall) =>
+          runWorkspaceShell(input.project.workspacePath, toolCall.args.command, {
+            runId: input.run.id,
+            onOutput: (stream, text) =>
+              emit("command_output_delta", {
+                toolCallId: createdToolCall.id,
+                stream,
+                text
+              })
+          })
         );
       }
 
@@ -637,7 +651,9 @@ export class LocalAgentRuntime implements AgentRuntime {
         workspaceSummary,
         toolOutputs,
         attachments: input.attachments,
-        reasoningEffort: input.run.reasoningEffort
+        reasoningEffort: input.run.reasoningEffort,
+        model: input.model,
+        systemPrompt: input.systemPrompt
       })) {
         ensureNotCancelled();
         if (event.type === "text_delta" && event.text) {
@@ -767,6 +783,8 @@ export class LocalAgentRuntime implements AgentRuntime {
       project: Project;
       prompt: string;
       attachments?: ChatAttachment[];
+      model?: AgentModel;
+      systemPrompt?: string;
     };
     provider: ReturnType<typeof getAgentProvider>;
     assistantMessageId: string;
@@ -784,6 +802,8 @@ export class LocalAgentRuntime implements AgentRuntime {
       toolOutputs: [],
       attachments: input.attachments,
       reasoningEffort: input.run.reasoningEffort,
+      model: input.model,
+      systemPrompt: input.systemPrompt,
       cwd: input.project.workspacePath
     })) {
       ensureNotCancelled();

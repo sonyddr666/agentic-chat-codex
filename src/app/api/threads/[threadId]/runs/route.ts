@@ -16,6 +16,7 @@ import { decideAgentMode } from "@/lib/mode/mode-router";
 import {
   capabilitiesForProvider,
   type AgentMode,
+  type AgentModel,
   type AgentReasoningEffort
 } from "@/lib/mode/mode-types";
 import { extractPdfTextFromBuffer } from "@/lib/pdf-text";
@@ -148,6 +149,14 @@ function normalizeReasoningEffort(value: unknown): AgentReasoningEffort {
     : "xhigh";
 }
 
+function normalizeAgentModel(value: unknown): AgentModel {
+  return value === "gpt-5.4" || value === "gpt-5.4-mini" ? value : "gpt-5.4-mini";
+}
+
+function normalizeSystemPrompt(value: unknown) {
+  return typeof value === "string" ? value.slice(0, 12_000).trim() : "";
+}
+
 export async function POST(
   request: Request,
   context: { params: Promise<{ threadId: string }> }
@@ -159,6 +168,8 @@ export async function POST(
       attachments?: unknown[];
       mode?: AgentMode;
       reasoningEffort?: AgentReasoningEffort;
+      model?: AgentModel;
+      systemPrompt?: string;
     };
     const attachments = normalizeAttachments(body.attachments);
     const content = body.content?.trim() || (attachments.length ? "Analise os anexos." : "");
@@ -202,6 +213,8 @@ export async function POST(
       cliAvailability
     });
     const capabilitiesSnapshot = capabilitiesForProvider(modeDecision.providerId);
+    const selectedModel = normalizeAgentModel(body.model);
+    const systemPrompt = normalizeSystemPrompt(body.systemPrompt);
     const run = createRun({
       threadId: thread.id,
       projectId: project.id,
@@ -213,7 +226,14 @@ export async function POST(
 
     const runtime = getAgentRuntime();
     setTimeout(() => {
-      void runtime.run({ run, project, prompt: content, attachments: persistedAttachments });
+      void runtime.run({
+        run,
+        project,
+        prompt: content,
+        attachments: persistedAttachments,
+        model: selectedModel,
+        systemPrompt
+      });
     }, 0);
 
     return json({ run, modeDecision }, { status: 201 });

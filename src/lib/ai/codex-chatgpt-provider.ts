@@ -1,10 +1,10 @@
 import { getCodexAuthManager, type CodexAuthManager } from "@/lib/codex/auth-manager";
-import type { AgentReasoningEffort } from "@/lib/mode/mode-types";
+import { DEFAULT_AGENT_MODEL, type AgentModel, type AgentReasoningEffort } from "@/lib/mode/mode-types";
 import type { ChatAttachment } from "@/lib/types";
 import type { AIProvider, AIProviderInput } from "./provider";
 
 const CODEX_URL = "https://chatgpt.com/backend-api/codex/responses";
-const DEFAULT_MODEL = "gpt-5.4-mini";
+const DEFAULT_MODEL = DEFAULT_AGENT_MODEL;
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
 
 type CodexStreamEvent = {
@@ -80,12 +80,12 @@ export class CodexChatGptProvider implements AIProvider {
 
   async *streamChat(input: AIProviderInput) {
     const messages = this.toCodexMessages(input);
-    for await (const delta of this.stream(messages)) {
+    for await (const delta of this.stream(messages, {}, input.model)) {
       yield { type: "text" as const, text: delta };
     }
   }
 
-  buildPayload(messages: CodexMessage[], extra: Record<string, unknown> = {}) {
+  buildPayload(messages: CodexMessage[], extra: Record<string, unknown> = {}, model?: AgentModel) {
     const instructions: string[] = [];
     const convo: CodexConversationMessage[] = [];
 
@@ -115,7 +115,7 @@ export class CodexChatGptProvider implements AIProvider {
     }));
 
     return {
-      model: this.model,
+      model: model ?? this.model,
       instructions: instructions.join("\n\n") || "You are a helpful assistant.",
       input,
       stream: true,
@@ -124,7 +124,7 @@ export class CodexChatGptProvider implements AIProvider {
     };
   }
 
-  async *stream(messages: CodexMessage[], extra: Record<string, unknown> = {}) {
+  async *stream(messages: CodexMessage[], extra: Record<string, unknown> = {}, model?: AgentModel) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeout);
 
@@ -133,7 +133,7 @@ export class CodexChatGptProvider implements AIProvider {
       response = await this.fetchImpl(CODEX_URL, {
         method: "POST",
         headers: await this.headers(),
-        body: JSON.stringify(this.buildPayload(messages, extra)),
+        body: JSON.stringify(this.buildPayload(messages, extra, model)),
         signal: controller.signal
       });
     } catch (error) {
@@ -241,6 +241,10 @@ export class CodexChatGptProvider implements AIProvider {
 
     if (input.workspaceSummary) {
       systemParts.push(`Contexto do workspace:\n${input.workspaceSummary}`);
+    }
+
+    if (input.systemPrompt?.trim()) {
+      systemParts.push(`Instrucao de sistema selecionada pelo usuario:\n${input.systemPrompt.trim()}`);
     }
 
     if (input.toolOutputs.length) {

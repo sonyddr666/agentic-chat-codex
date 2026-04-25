@@ -1,14 +1,11 @@
-import { execFile } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { promisify } from "node:util";
 import { applyPatch as applyTextPatch } from "diff";
 import type { WorkspaceTreeNode } from "@/lib/types";
 import { clampText } from "@/lib/utils";
 import { createUnifiedDiff } from "./diff";
 import { createWorkspaceGuard } from "./path-guard";
-
-const execFileAsync = promisify(execFile);
 
 const IGNORED_DIRECTORIES = new Set([
   ".git",
@@ -24,6 +21,20 @@ const IGNORED_DIRECTORIES = new Set([
 const TEXT_FILE_LIMIT = 512 * 1024;
 const SEARCH_FILE_LIMIT = 256 * 1024;
 const SHELL_OUTPUT_LIMIT = 64 * 1024;
+const SHELL_TIMEOUT_MS = 120_000;
+const activeShellProcesses = new Map<string, ChildProcessWithoutNullStreams>();
+
+function killProcessTree(childProcess: ChildProcessWithoutNullStreams) {
+  if (process.platform === "win32" && childProcess.pid) {
+    const killer = spawn("taskkill", ["/PID", String(childProcess.pid), "/T", "/F"], {
+      windowsHide: true
+    });
+    killer.on("error", () => childProcess.kill());
+    return;
+  }
+
+  childProcess.kill();
+}
 
 function isLikelyText(buffer: Buffer) {
   if (buffer.length === 0) {
@@ -200,41 +211,92 @@ export function patchWorkspaceFile(workspacePath: string, filePath: string, patc
   return writeWorkspaceFile(workspacePath, filePath, patched);
 }
 
-export async function runWorkspaceShell(workspacePath: string, command: string) {
+export function cancelWorkspaceShell(runId: string) {
+  const childProcess = activeShellProcesses.get(runId);
+  if (!childProcess) {
+    return false;
+  }
+
+  killProcessTree(childProcess);
+  activeShellProcesses.delete(runId);
+  return true;
+}
+
+export async function runWorkspaceShell(
+  workspacePath: string,
+  command: string,
+  options: {
+    runId?: string;
+    timeoutMs?: number;
+    onOutput?: (stream: "stdout" | "stderr", text: string) => void;
+  } = {}
+) {
   const guard = createWorkspaceGuard(workspacePath);
   const startedAt = Date.now();
+  let stdout = "";
+  let stderr = "";
+  let timedOut = false;
 
-  try {
-    const result = await execFileAsync(command, {
+  return await new Promise<{
+    command: string;
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+    durationMs: number;
+  }>((resolve) => {
+    const child = spawn(command, {
       cwd: guard.root,
       shell: true,
-      timeout: 20_000,
-      windowsHide: true,
-      maxBuffer: SHELL_OUTPUT_LIMIT
+      windowsHide: true
     });
 
-    return {
-      command,
-      exitCode: 0,
-      stdout: clampText(result.stdout ?? "", SHELL_OUTPUT_LIMIT),
-      stderr: clampText(result.stderr ?? "", SHELL_OUTPUT_LIMIT),
-      durationMs: Date.now() - startedAt
-    };
-  } catch (error) {
-    const failure = error as {
-      code?: number | string;
-      stdout?: string;
-      stderr?: string;
-      message?: string;
-    };
+    if (options.runId) {
+      activeShellProcesses.set(options.runId, child);
+    }
 
-    return {
-      command,
-      exitCode: typeof failure.code === "number" ? failure.code : 1,
-      stdout: clampText(failure.stdout ?? "", SHELL_OUTPUT_LIMIT),
-      stderr: clampText(failure.stderr ?? failure.message ?? "Command failed.", SHELL_OUTPUT_LIMIT),
-      durationMs: Date.now() - startedAt
-    };
-  }
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      killProcessTree(child);
+    }, options.timeoutMs ?? SHELL_TIMEOUT_MS);
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      stdout = clampText(`${stdout}${text}`, SHELL_OUTPUT_LIMIT);
+      options.onOutput?.("stdout", text);
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      stderr = clampText(`${stderr}${text}`, SHELL_OUTPUT_LIMIT);
+      options.onOutput?.("stderr", text);
+    });
+
+    child.on("error", (error) => {
+      stderr = clampText(`${stderr}${error.message}`, SHELL_OUTPUT_LIMIT);
+      options.onOutput?.("stderr", error.message);
+    });
+
+    child.on("close", (code, signal) => {
+      clearTimeout(timeout);
+      if (options.runId) {
+        activeShellProcesses.delete(options.runId);
+      }
+
+      const timeoutMessage = timedOut ? `\nCommand timed out after ${options.timeoutMs ?? SHELL_TIMEOUT_MS}ms.` : "";
+      const signalMessage = signal ? `\nProcess stopped by signal ${signal}.` : "";
+      const finalStderr = clampText(`${stderr}${timeoutMessage}${signalMessage}`, SHELL_OUTPUT_LIMIT);
+      if (timeoutMessage || signalMessage) {
+        options.onOutput?.("stderr", `${timeoutMessage}${signalMessage}`);
+      }
+
+      resolve({
+        command,
+        exitCode: typeof code === "number" ? code : timedOut ? 124 : 1,
+        stdout,
+        stderr: finalStderr,
+        durationMs: Date.now() - startedAt
+      });
+    });
+  });
 }
 

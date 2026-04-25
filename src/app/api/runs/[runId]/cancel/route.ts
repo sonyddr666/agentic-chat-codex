@@ -1,6 +1,7 @@
 import { createRunEvent, getRun, updateRunStatus } from "@/lib/db/repositories";
 import { publishRunEvent } from "@/lib/events/event-bus";
 import { apiError, json } from "@/lib/http";
+import { cancelWorkspaceShell } from "@/lib/agent/tools";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,6 +18,7 @@ export async function POST(
     }
 
     updateRunStatus(run.id, "cancelled");
+    cancelWorkspaceShell(run.id);
     const event = createRunEvent({
       runId: run.id,
       type: "run_complete",

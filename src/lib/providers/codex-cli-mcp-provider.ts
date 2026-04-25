@@ -249,6 +249,9 @@ export class CodexCliMcpProvider implements AgentProvider {
 
     const task = (async () => {
       try {
+        const prompt = input.systemPrompt?.trim()
+          ? [`System prompt:\n${input.systemPrompt.trim()}`, `User task:\n${input.prompt}`].join("\n\n")
+          : input.prompt;
         await client.request("initialize", {
           protocolVersion: "2024-11-05",
           capabilities: { tools: {} },
@@ -258,8 +261,8 @@ export class CodexCliMcpProvider implements AgentProvider {
         await client.request("tools/call", {
           name: "codex",
           arguments: {
-            prompt: input.prompt,
-            model: this.model,
+            prompt,
+            model: input.model ?? this.model,
             cwd: input.cwd,
             "approval-policy": "on-request",
             sandbox: "workspace-write",

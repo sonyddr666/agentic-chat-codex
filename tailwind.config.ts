@@ -9,17 +9,17 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        ink: "#202124",
-        paper: "#f4f4f1",
-        panel: "#ffffff",
-        line: "#d7dad2",
-        muted: "#64685f",
-        teal: "#187d6f",
-        berry: "#8d3f64",
-        amber: "#a46617"
+        ink: "rgb(var(--color-ink) / <alpha-value>)",
+        paper: "rgb(var(--color-paper) / <alpha-value>)",
+        panel: "rgb(var(--color-panel) / <alpha-value>)",
+        line: "rgb(var(--color-line) / <alpha-value>)",
+        muted: "rgb(var(--color-muted) / <alpha-value>)",
+        teal: "rgb(var(--color-teal) / <alpha-value>)",
+        berry: "rgb(var(--color-berry) / <alpha-value>)",
+        amber: "rgb(var(--color-amber) / <alpha-value>)"
       },
       boxShadow: {
-        soft: "0 1px 2px rgba(32, 33, 36, 0.08)"
+        soft: "0 1px 2px rgb(var(--color-shadow) / 0.16)"
       }
     }
   },

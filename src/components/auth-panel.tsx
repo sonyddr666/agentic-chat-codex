@@ -278,7 +278,7 @@ export function AuthPanel({ status, onStatusChange }: AuthPanelProps) {
           placeholder=".data/codex-auth.json or pasted JSON"
         />
         <button
-          className="mt-2 h-9 w-full rounded-md bg-ink text-sm font-semibold text-white hover:bg-ink/90 disabled:opacity-60"
+          className="mt-2 h-9 w-full rounded-md bg-teal text-sm font-semibold text-white hover:bg-teal/90 disabled:opacity-60"
           disabled={busy || !importValue.trim()}
           type="submit"
         >

@@ -15,6 +15,7 @@ import {
   KeyRound,
   Loader2,
   MessageSquarePlus,
+  Moon,
   Paperclip,
   PanelLeft,
   PanelRight,
@@ -24,6 +25,7 @@ import {
   Send,
   Settings,
   Square,
+  Sun,
   Terminal,
   Upload,
   X,
@@ -46,7 +48,9 @@ import {
 } from "@/lib/attachments";
 import {
   capabilitiesForProvider,
+  DEFAULT_AGENT_MODEL,
   type AgentMode,
+  type AgentModel,
   type AgentReasoningEffort,
   type ModeDecision
 } from "@/lib/mode/mode-types";
@@ -79,15 +83,35 @@ type ThreadResponse = {
 type WorkspaceFile = {
   path: string;
   content: string;
+  kind?: "text" | "image";
+  mimeType?: string;
+  size?: number;
+  dataUrl?: string;
 };
 
 type SidePanel = "files" | "run" | "diff" | "auth" | "options";
+type ThemeMode = "light" | "dark";
+type UserSystemPrompt = {
+  id: string;
+  name: string;
+  prompt: string;
+};
 
 type DiffEntry = {
   id: string;
   path: string;
   diff: string;
   createdAt: string;
+};
+
+type ShellSession = {
+  id: string;
+  command: string;
+  output: string;
+  status: "running" | "completed" | "failed" | "cancelled";
+  exitCode: number | null;
+  startedAt: string;
+  completedAt: string | null;
 };
 
 const RUN_EVENT_TYPES: RunEvent["type"][] = [
@@ -101,6 +125,48 @@ const RUN_EVENT_TYPES: RunEvent["type"][] = [
   "approval_requested",
   "error",
   "run_complete"
+];
+
+const WORKSPACE_IMAGE_EXTENSIONS = new Set([
+  "avif",
+  "bmp",
+  "gif",
+  "ico",
+  "jpeg",
+  "jpg",
+  "png",
+  "svg",
+  "webp"
+]);
+
+const MODEL_OPTIONS: Array<{ value: AgentModel; label: string }> = [
+  { value: "gpt-5.4-mini", label: "5.4 Mini" },
+  { value: "gpt-5.4", label: "5.4" }
+];
+
+const SYSTEM_PROMPT_PRESETS: Array<{ id: string; name: string; prompt: string }> = [
+  {
+    id: "default",
+    name: "Padrao",
+    prompt: ""
+  },
+  {
+    id: "direct",
+    name: "Direto",
+    prompt: "Responda de forma curta, objetiva e pratica. Evite enrolacao."
+  },
+  {
+    id: "coding",
+    name: "Coding",
+    prompt:
+      "Atue como engenheiro senior. Quando houver workspace, prefira verificar arquivos e executar acoes necessarias antes de responder. Explique somente o essencial."
+  },
+  {
+    id: "review",
+    name: "Review",
+    prompt:
+      "Priorize encontrar bugs, riscos, regressao e lacunas de teste. Comece pelos achados mais importantes e seja especifico."
+  }
 ];
 
 const SIDE_PANELS: Array<{ id: SidePanel; label: string; icon: typeof Files }> = [
@@ -230,6 +296,11 @@ function formatRunEventPayload(event: RunEvent) {
   return JSON.stringify(event.payload, null, 2);
 }
 
+function isWorkspaceImagePath(filePath: string) {
+  const extension = filePath.split(".").pop()?.toLowerCase() ?? "";
+  return WORKSPACE_IMAGE_EXTENSIONS.has(extension);
+}
+
 function TreeNode({
   node,
   activePath,
@@ -243,6 +314,8 @@ function TreeNode({
   const isActive = activePath === node.path;
 
   if (node.type === "file") {
+    const isImage = isWorkspaceImagePath(node.path);
+    const Icon = isImage ? ImageIcon : FileText;
     return (
       <button
         className={classNames(
@@ -252,7 +325,7 @@ function TreeNode({
         onClick={() => onSelect(node.path)}
         title={node.path}
       >
-        <FileText className="h-4 w-4 shrink-0" />
+        <Icon className={classNames("h-4 w-4 shrink-0", isImage ? "text-teal" : "")} />
         <span className="min-w-0 truncate">{node.name}</span>
       </button>
     );
@@ -315,7 +388,7 @@ function MessageCopyButton({ value }: { value: string }) {
       aria-label="Copy message"
     >
       {copied ? <Check className="h-3.5 w-3.5 text-teal" /> : <Copy className="h-3.5 w-3.5" />}
-      <span className="pointer-events-none absolute bottom-full right-0 z-20 mb-1 whitespace-nowrap rounded-md bg-ink px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-soft transition-opacity group-hover/copy:opacity-100">
+      <span className="pointer-events-none absolute bottom-full right-0 z-20 mb-1 whitespace-nowrap rounded-md border border-line bg-panel px-2 py-1 text-[11px] font-medium text-ink opacity-0 shadow-soft transition-opacity group-hover/copy:opacity-100">
         {copied ? "Copied" : "Copy message"}
       </span>
     </button>
@@ -435,6 +508,52 @@ function AttachmentPill({
   );
 }
 
+function ShellTerminalCard({
+  session,
+  canStop,
+  onStop
+}: {
+  session: ShellSession;
+  canStop: boolean;
+  onStop: () => void;
+}) {
+  return (
+    <div className="w-full rounded-lg border border-line bg-[#0b0f0d] text-[#e9f4ed] shadow-soft">
+      <div className="flex items-center justify-between gap-2 border-b border-white/10 px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <Terminal className="h-4 w-4 shrink-0 text-teal" />
+          <span className="min-w-0 truncate font-mono text-xs">{session.command}</span>
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="rounded border border-white/10 px-2 py-1 text-[11px] uppercase text-white/70">
+            {session.status === "running"
+              ? "rodando"
+              : session.status === "cancelled"
+                ? "parado"
+                : session.exitCode === 0
+                  ? "ok"
+                  : `exit ${session.exitCode ?? "?"}`}
+          </span>
+          {canStop ? (
+            <button
+              type="button"
+              className="flex h-7 items-center gap-1 rounded-md bg-berry px-2 text-xs font-semibold text-white hover:bg-berry/90"
+              onClick={onStop}
+              title="Parar comando"
+            >
+              <Square className="h-3.5 w-3.5" />
+              Parar
+            </button>
+          ) : null}
+        </div>
+      </div>
+      <pre className="thin-scrollbar max-h-72 min-h-32 overflow-auto whitespace-pre-wrap p-3 font-mono text-xs leading-5">
+        {session.output || (session.status === "running" ? "$ aguardando saida..." : "$ sem saida")}
+      </pre>
+    </div>
+  );
+}
+
 export function AppShell() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [threads, setThreads] = useState<Thread[]>([]);
@@ -454,7 +573,12 @@ export function AppShell() {
   const [authStatus, setAuthStatus] = useState<CodexAuthStatus | null>(null);
   const [composer, setComposer] = useState("");
   const [agentMode, setAgentMode] = useState<AgentMode>("auto");
+  const [selectedModel, setSelectedModel] = useState<AgentModel>(DEFAULT_AGENT_MODEL);
   const [reasoningEffort, setReasoningEffort] = useState<AgentReasoningEffort>("xhigh");
+  const [themeMode, setThemeMode] = useState<ThemeMode>("dark");
+  const [systemPromptId, setSystemPromptId] = useState("default");
+  const [systemPromptDraft, setSystemPromptDraft] = useState("");
+  const [userSystemPrompts, setUserSystemPrompts] = useState<UserSystemPrompt[]>([]);
   const [latestModeDecision, setLatestModeDecision] = useState<ModeDecision | null>(null);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -511,6 +635,96 @@ export function AppShell() {
     () => runs.find((run) => run.id === runningRunId) ?? runs[0] ?? null,
     [runningRunId, runs]
   );
+  const shellSessions = useMemo(() => {
+    const sessions = new Map<string, ShellSession>();
+
+    const ensureSession = (id: string, fallbackDate: string) => {
+      const existing = sessions.get(id);
+      if (existing) {
+        return existing;
+      }
+
+      const created: ShellSession = {
+        id,
+        command: "shell",
+        output: "",
+        status: "running",
+        exitCode: null,
+        startedAt: fallbackDate,
+        completedAt: null
+      };
+      sessions.set(id, created);
+      return created;
+    };
+
+    for (const event of events) {
+      if (event.type === "tool_start" && event.payload.name === "run_shell") {
+        const id = String(event.payload.toolCallId ?? event.id);
+        const args = event.payload.args as Record<string, unknown> | undefined;
+        sessions.set(id, {
+          id,
+          command: String(args?.command ?? "shell"),
+          output: "",
+          status: "running",
+          exitCode: null,
+          startedAt: event.createdAt,
+          completedAt: null
+        });
+        continue;
+      }
+
+      if (event.type === "command_output_delta") {
+        const id = String(event.payload.toolCallId ?? "shell");
+        const session = ensureSession(id, event.createdAt);
+        const text = String(event.payload.text ?? "");
+        session.output = `${session.output}${text}`;
+        continue;
+      }
+
+      if (event.type === "tool_output" && event.payload.name === "run_shell") {
+        const id = String(event.payload.toolCallId ?? event.id);
+        const session = ensureSession(id, event.createdAt);
+        const output = String(event.payload.output ?? "");
+        const error = String(event.payload.error ?? "");
+
+        if (output) {
+          try {
+            const parsed = JSON.parse(output) as {
+              command?: string;
+              exitCode?: number;
+              stdout?: string;
+              stderr?: string;
+            };
+            session.command = parsed.command ?? session.command;
+            session.exitCode = typeof parsed.exitCode === "number" ? parsed.exitCode : null;
+            session.status = session.exitCode === 0 ? "completed" : "failed";
+            if (!session.output.trim()) {
+              session.output = [parsed.stdout, parsed.stderr].filter(Boolean).join("\n");
+            }
+          } catch {
+            session.output = session.output || output;
+            session.status = "completed";
+          }
+        } else if (error) {
+          session.output = `${session.output}${error}`;
+          session.status = "failed";
+        }
+
+        session.completedAt = event.createdAt;
+      }
+
+      if (event.type === "run_complete" && event.payload.status === "cancelled") {
+        for (const session of sessions.values()) {
+          if (session.status === "running") {
+            session.status = "cancelled";
+            session.completedAt = event.createdAt;
+          }
+        }
+      }
+    }
+
+    return Array.from(sessions.values());
+  }, [events]);
   const activeProviderId = activeRun?.providerId ?? "codex-http";
   const activeResolvedMode = activeRun?.mode ?? "normal";
   const activeCapabilities =
@@ -520,6 +734,24 @@ export function AppShell() {
       ? authStatus.activeAccount.email
       : authStatus.activeAccount.label
     : "No account";
+  const systemPromptOptions = useMemo(
+    () => [
+      ...SYSTEM_PROMPT_PRESETS,
+      ...userSystemPrompts.map((item) => ({
+        id: item.id,
+        name: item.name,
+        prompt: item.prompt
+      }))
+    ],
+    [userSystemPrompts]
+  );
+  const activeSystemPromptLabel = useMemo(() => {
+    if (systemPromptId === "custom-draft") {
+      return "Personalizado";
+    }
+
+    return systemPromptOptions.find((option) => option.id === systemPromptId)?.name ?? "Personalizado";
+  }, [systemPromptId, systemPromptOptions]);
   const messageMeta = useCallback(
     (message: Message) => {
       const time = formatTime(message.createdAt);
@@ -640,6 +872,11 @@ export function AppShell() {
       setAgentMode(stored);
     }
 
+    const storedModel = window.localStorage.getItem("agentic.model");
+    if (storedModel === "gpt-5.4" || storedModel === "gpt-5.4-mini") {
+      setSelectedModel(storedModel);
+    }
+
     const storedEffort = window.localStorage.getItem("agentic.reasoningEffort");
     if (
       storedEffort === "low" ||
@@ -649,6 +886,40 @@ export function AppShell() {
     ) {
       setReasoningEffort(storedEffort);
     }
+
+    const storedTheme = window.localStorage.getItem("agentic.theme");
+    if (storedTheme === "light" || storedTheme === "dark") {
+      setThemeMode(storedTheme);
+    }
+
+    try {
+      const savedPrompts = JSON.parse(
+        window.localStorage.getItem("agentic.systemPrompts") ?? "[]"
+      ) as UserSystemPrompt[];
+      if (Array.isArray(savedPrompts)) {
+        setUserSystemPrompts(
+          savedPrompts
+            .filter(
+              (item): item is UserSystemPrompt =>
+                typeof item?.id === "string" &&
+                typeof item?.name === "string" &&
+                typeof item?.prompt === "string"
+            )
+            .slice(0, 20)
+        );
+      }
+    } catch {
+      setUserSystemPrompts([]);
+    }
+
+    const storedSystemPromptId = window.localStorage.getItem("agentic.systemPromptId");
+    const storedSystemPromptDraft = window.localStorage.getItem("agentic.systemPromptDraft");
+    if (storedSystemPromptId) {
+      setSystemPromptId(storedSystemPromptId);
+    }
+    if (storedSystemPromptDraft !== null) {
+      setSystemPromptDraft(storedSystemPromptDraft);
+    }
   }, []);
 
   useEffect(() => {
@@ -656,8 +927,29 @@ export function AppShell() {
   }, [agentMode]);
 
   useEffect(() => {
+    window.localStorage.setItem("agentic.model", selectedModel);
+  }, [selectedModel]);
+
+  useEffect(() => {
     window.localStorage.setItem("agentic.reasoningEffort", reasoningEffort);
   }, [reasoningEffort]);
+
+  useEffect(() => {
+    window.localStorage.setItem("agentic.systemPromptId", systemPromptId);
+  }, [systemPromptId]);
+
+  useEffect(() => {
+    window.localStorage.setItem("agentic.systemPromptDraft", systemPromptDraft);
+  }, [systemPromptDraft]);
+
+  useEffect(() => {
+    window.localStorage.setItem("agentic.systemPrompts", JSON.stringify(userSystemPrompts));
+  }, [userSystemPrompts]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = themeMode;
+    window.localStorage.setItem("agentic.theme", themeMode);
+  }, [themeMode]);
 
   const updateAutoScroll = useCallback(() => {
     const element = chatScrollRef.current;
@@ -683,7 +975,7 @@ export function AppShell() {
       messagesEndRef.current?.scrollIntoView({ behavior: "auto", block: "end" });
       scrollFrameRef.current = null;
     });
-  }, [visibleMessages, runningRunId]);
+  }, [visibleMessages, runningRunId, events.length]);
 
   useEffect(() => {
     return () => {
@@ -731,11 +1023,62 @@ export function AppShell() {
       return;
     }
 
-    const data = await fetchJson<{ file: WorkspaceFile }>(
-      `/api/workspace/file?projectId=${encodeURIComponent(activeProjectId)}&path=${encodeURIComponent(filePath)}`
-    );
-    setSelectedFile(data.file);
-    openPanel("files");
+    try {
+      setError(null);
+      const data = await fetchJson<{ file: WorkspaceFile }>(
+        `/api/workspace/file?projectId=${encodeURIComponent(activeProjectId)}&path=${encodeURIComponent(filePath)}`
+      );
+      setSelectedFile(data.file);
+      openPanel("files");
+    } catch (fileError) {
+      setError(fileError instanceof Error ? fileError.message : "Could not open file.");
+    }
+  };
+
+  const selectSystemPrompt = (promptId: string) => {
+    setSystemPromptId(promptId);
+    if (promptId === "custom-draft") {
+      return;
+    }
+
+    const selected = systemPromptOptions.find((option) => option.id === promptId);
+    if (selected) {
+      setSystemPromptDraft(selected.prompt);
+    }
+  };
+
+  const saveSystemPrompt = () => {
+    const prompt = systemPromptDraft.trim();
+    if (!prompt) {
+      setError("Escreva um system prompt antes de salvar.");
+      return;
+    }
+
+    const name = window.prompt("Nome do system prompt:", activeSystemPromptLabel);
+    if (!name?.trim()) {
+      return;
+    }
+
+    const saved: UserSystemPrompt = {
+      id: `user_${Date.now().toString(36)}`,
+      name: name.trim().slice(0, 48),
+      prompt
+    };
+    setUserSystemPrompts((current) => [saved, ...current].slice(0, 20));
+    setSystemPromptId(saved.id);
+    setSystemPromptDraft(saved.prompt);
+  };
+
+  const deleteSystemPrompt = () => {
+    if (!systemPromptId.startsWith("user_")) {
+      setSystemPromptId("default");
+      setSystemPromptDraft("");
+      return;
+    }
+
+    setUserSystemPrompts((current) => current.filter((prompt) => prompt.id !== systemPromptId));
+    setSystemPromptId("default");
+    setSystemPromptDraft("");
   };
 
   const handleRunEvent = useCallback(
@@ -975,7 +1318,9 @@ export function AppShell() {
           content: prompt,
           attachments: pendingAttachments,
           mode: agentMode,
-          reasoningEffort
+          reasoningEffort,
+          model: selectedModel,
+          systemPrompt: systemPromptDraft
         })
       });
       setLatestModeDecision(data.modeDecision);
@@ -1029,7 +1374,7 @@ export function AppShell() {
                   <div className="truncate text-xs text-muted">Historico</div>
                 </div>
                 <button
-                  className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-ink text-white hover:bg-ink/90"
+                  className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-teal text-white hover:bg-teal/90"
                   onClick={() => {
                     if (activeProjectId) {
                       void createThreadForProject(activeProjectId).then(closeLeftOnMobile);
@@ -1089,7 +1434,7 @@ export function AppShell() {
                       key={thread.id}
                       className={classNames(
                         "w-full rounded-md px-2 py-2 text-left text-sm transition",
-                        thread.id === activeThreadId ? "bg-ink text-white" : "hover:bg-ink/5"
+                        thread.id === activeThreadId ? "bg-teal text-white" : "hover:bg-ink/5"
                       )}
                       onClick={() => void selectThread(thread.id)}
                       title={thread.title}
@@ -1139,7 +1484,7 @@ export function AppShell() {
         {leftOpen ? (
           <button
             type="button"
-            className="fixed bottom-0 right-0 top-0 z-20 bg-ink/20 backdrop-blur-[1px] max-[760px]:left-[min(86vw,320px)] min-[761px]:hidden"
+            className="fixed bottom-0 right-0 top-0 z-20 bg-black/30 backdrop-blur-[1px] max-[760px]:left-[min(86vw,320px)] min-[761px]:hidden"
             onClick={() => setLeftOpen(false)}
             aria-label="Fechar historico"
           />
@@ -1194,6 +1539,14 @@ export function AppShell() {
               </button>
               <button
                 className="grid h-9 w-9 place-items-center rounded-md border border-line bg-panel hover:bg-paper"
+                onClick={() => setThemeMode((current) => (current === "dark" ? "light" : "dark"))}
+                title={themeMode === "dark" ? "Usar modo claro" : "Usar modo escuro"}
+                aria-label={themeMode === "dark" ? "Usar modo claro" : "Usar modo escuro"}
+              >
+                {themeMode === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </button>
+              <button
+                className="grid h-9 w-9 place-items-center rounded-md border border-line bg-panel hover:bg-paper"
                 onClick={() => activeThreadId && void loadThread(activeThreadId)}
                 title="Refresh chat"
               >
@@ -1236,7 +1589,7 @@ export function AppShell() {
                       )}
                     >
                       {message.role === "assistant" ? (
-                        <div className="mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-ink text-white sm:h-8 sm:w-8">
+                        <div className="mt-1 grid h-7 w-7 shrink-0 place-items-center rounded-full bg-teal text-white sm:h-8 sm:w-8">
                           <Bot className="h-4 w-4" />
                         </div>
                       ) : null}
@@ -1293,9 +1646,23 @@ export function AppShell() {
                     </article>
                   );
                 })}
+                {shellSessions.map((session) => (
+                  <div key={session.id} className="flex items-start gap-3">
+                    <div className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-teal text-white">
+                      <Terminal className="h-4 w-4" />
+                    </div>
+                    <div className="w-full max-w-[calc(100%-2.75rem)] sm:max-w-[92%]">
+                      <ShellTerminalCard
+                        session={session}
+                        canStop={Boolean(runningRunId) && session.status === "running"}
+                        onStop={() => void cancelRun()}
+                      />
+                    </div>
+                  </div>
+                ))}
                 {runningRunId ? (
                   <div className="flex items-center gap-3">
-                    <div className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-ink text-white">
+                    <div className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-teal text-white">
                       <Bot className="h-4 w-4" />
                     </div>
                     <div className="flex items-center gap-2 rounded-lg border border-line bg-paper px-4 py-3 text-sm text-muted shadow-soft">
@@ -1332,6 +1699,33 @@ export function AppShell() {
                   disabled={Boolean(runningRunId)}
                   onChange={setAgentMode}
                 />
+                <select
+                  className="h-8 rounded-md border border-line bg-panel px-2 text-xs font-semibold outline-none hover:bg-paper"
+                  disabled={Boolean(runningRunId)}
+                  value={selectedModel}
+                  onChange={(event) => setSelectedModel(event.target.value as AgentModel)}
+                  title="Modelo"
+                >
+                  {MODEL_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  className="h-8 max-w-36 rounded-md border border-line bg-panel px-2 text-xs font-semibold outline-none hover:bg-paper"
+                  disabled={Boolean(runningRunId)}
+                  value={systemPromptId}
+                  onChange={(event) => selectSystemPrompt(event.target.value)}
+                  title="System prompt"
+                >
+                  {systemPromptOptions.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.name}
+                    </option>
+                  ))}
+                  <option value="custom-draft">Personalizado</option>
+                </select>
                 <div className="ml-auto">
                   <ReasoningEffortSelector
                     value={reasoningEffort}
@@ -1416,7 +1810,7 @@ export function AppShell() {
         {rightOpen ? (
           <button
             type="button"
-            className="fixed bottom-0 left-0 top-0 z-30 bg-ink/20 backdrop-blur-[1px] max-[980px]:right-[420px] max-[520px]:hidden min-[981px]:hidden"
+            className="fixed bottom-0 left-0 top-0 z-30 bg-black/30 backdrop-blur-[1px] max-[980px]:right-[420px] max-[520px]:hidden min-[981px]:hidden"
             onClick={() => setRightOpen(false)}
             aria-label="Fechar painel lateral"
           />
@@ -1452,7 +1846,7 @@ export function AppShell() {
                   key={panel.id}
                   className={classNames(
                     "flex h-9 items-center justify-center gap-1 rounded-md px-2",
-                    activePanel === panel.id ? "bg-ink text-white" : "hover:bg-ink/5"
+                    activePanel === panel.id ? "bg-teal text-white" : "hover:bg-ink/5"
                   )}
                   onClick={() => setActivePanel(panel.id)}
                   title={panel.label}
@@ -1483,12 +1877,36 @@ export function AppShell() {
                 </div>
                 {selectedFile ? (
                   <div className="rounded-lg border border-line bg-paper">
-                    <div className="border-b border-line px-3 py-2 text-sm font-semibold">
-                      {selectedFile.path}
+                    <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2 text-sm font-semibold">
+                      <span className="min-w-0 truncate" title={selectedFile.path}>
+                        {selectedFile.path}
+                      </span>
+                      {selectedFile.kind === "image" && selectedFile.size ? (
+                        <span className="shrink-0 text-xs font-normal text-muted">
+                          {formatAttachmentSize(selectedFile.size)}
+                        </span>
+                      ) : null}
                     </div>
-                    <pre className="thin-scrollbar max-h-[44vh] overflow-auto p-3 text-xs leading-5">
-                      {selectedFile.content}
-                    </pre>
+                    {selectedFile.kind === "image" && selectedFile.dataUrl ? (
+                      <div className="bg-panel p-3">
+                        <a
+                          href={selectedFile.dataUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          title="Abrir imagem"
+                        >
+                          <img
+                            alt={selectedFile.path}
+                            className="max-h-[52vh] w-full rounded-md border border-line bg-paper object-contain"
+                            src={selectedFile.dataUrl}
+                          />
+                        </a>
+                      </div>
+                    ) : (
+                      <pre className="thin-scrollbar max-h-[44vh] overflow-auto p-3 text-xs leading-5">
+                        {selectedFile.content}
+                      </pre>
+                    )}
                   </div>
                 ) : null}
               </div>
@@ -1602,13 +2020,80 @@ export function AppShell() {
                         onChange={setReasoningEffort}
                       />
                     </div>
+                    <div className="rounded-md bg-panel px-3 py-2">
+                      <div className="mb-2 text-xs text-muted">Modelo</div>
+                      <select
+                        className="h-8 w-full rounded-md border border-line bg-paper px-2 text-xs font-semibold outline-none hover:bg-panel"
+                        disabled={Boolean(runningRunId)}
+                        value={selectedModel}
+                        onChange={(event) => setSelectedModel(event.target.value as AgentModel)}
+                      >
+                        {MODEL_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="rounded-md bg-panel px-3 py-2">
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <span className="text-xs text-muted">System prompt</span>
+                        <span className="truncate text-xs font-medium">{activeSystemPromptLabel}</span>
+                      </div>
+                      <div className="mb-2 flex gap-2">
+                        <select
+                          className="h-8 min-w-0 flex-1 rounded-md border border-line bg-paper px-2 text-xs font-semibold outline-none hover:bg-panel"
+                          disabled={Boolean(runningRunId)}
+                          value={systemPromptId}
+                          onChange={(event) => selectSystemPrompt(event.target.value)}
+                        >
+                          {systemPromptOptions.map((option) => (
+                            <option key={option.id} value={option.id}>
+                              {option.name}
+                            </option>
+                          ))}
+                          <option value="custom-draft">Personalizado</option>
+                        </select>
+                        <button
+                          className="h-8 rounded-md border border-line bg-paper px-2 text-xs font-semibold hover:bg-panel"
+                          onClick={saveSystemPrompt}
+                          type="button"
+                        >
+                          Salvar
+                        </button>
+                        <button
+                          className="h-8 rounded-md border border-line bg-paper px-2 text-xs font-semibold hover:bg-panel"
+                          onClick={deleteSystemPrompt}
+                          type="button"
+                        >
+                          Limpar
+                        </button>
+                      </div>
+                      <textarea
+                        className="thin-scrollbar min-h-24 w-full resize-y rounded-md border border-line bg-paper p-2 text-xs leading-5 outline-none focus:border-teal"
+                        disabled={Boolean(runningRunId)}
+                        placeholder="Instrucao extra para esta conversa..."
+                        value={systemPromptDraft}
+                        onChange={(event) => {
+                          setSystemPromptId("custom-draft");
+                          setSystemPromptDraft(event.target.value);
+                        }}
+                      />
+                    </div>
+                    <div className="flex items-center justify-between gap-3 rounded-md bg-panel px-3 py-2">
+                      <span className="text-muted">Tema</span>
+                      <button
+                        className="flex h-8 items-center gap-2 rounded-md border border-line bg-paper px-3 text-xs font-semibold hover:bg-panel"
+                        onClick={() => setThemeMode((current) => (current === "dark" ? "light" : "dark"))}
+                        type="button"
+                      >
+                        {themeMode === "dark" ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+                        {themeMode === "dark" ? "Escuro" : "Claro"}
+                      </button>
+                    </div>
                     <div className="flex items-center justify-between gap-3 rounded-md bg-panel px-3 py-2">
                       <span className="text-muted">Provider</span>
                       <span className="truncate font-medium">{activeProviderId}</span>
-                    </div>
-                    <div className="flex items-center justify-between gap-3 rounded-md bg-panel px-3 py-2">
-                      <span className="text-muted">Model</span>
-                      <span className="truncate font-medium">{authStatus?.model ?? "gpt-5.4-mini"}</span>
                     </div>
                     <div className="flex items-center justify-between gap-3 rounded-md bg-panel px-3 py-2">
                       <span className="text-muted">Messages</span>

@@ -6,6 +6,10 @@ export type AgentProviderId = "codex-http" | "codex-cli-mcp";
 
 export type AgentReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
+export type AgentModel = "gpt-5.4-mini" | "gpt-5.4";
+
+export const DEFAULT_AGENT_MODEL: AgentModel = "gpt-5.4-mini";
+
 export type CliUnavailableReason =
   | "not_found"
   | "mcp_failed"

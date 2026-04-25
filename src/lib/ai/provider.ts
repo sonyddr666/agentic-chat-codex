@@ -1,6 +1,6 @@
 import type { Message } from "@/lib/types";
 import type { ChatAttachment } from "@/lib/types";
-import type { AgentReasoningEffort } from "@/lib/mode/mode-types";
+import type { AgentModel, AgentReasoningEffort } from "@/lib/mode/mode-types";
 
 export type AIProviderChunk = {
   type: "text";
@@ -14,6 +14,8 @@ export type AIProviderInput = {
   toolOutputs: string[];
   attachments?: ChatAttachment[];
   reasoningEffort?: AgentReasoningEffort;
+  model?: AgentModel;
+  systemPrompt?: string;
 };
 
 export interface AIProvider {

@@ -46,7 +46,7 @@ export function ReasoningEffortSelector({
                 type="button"
                 className={[
                   "flex h-8 w-full items-center justify-between gap-2 px-3 text-left text-xs font-semibold hover:bg-panel",
-                  selected ? "bg-ink text-white hover:bg-ink" : "text-ink"
+                  selected ? "bg-teal text-white hover:bg-teal/90" : "text-ink"
                 ]
                   .filter(Boolean)
                   .join(" ")}
